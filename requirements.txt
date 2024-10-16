@@ -1,0 +1,20 @@
+# Deep Learning
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.4.1
+lightning==2.4.0
+tensorboard==2.18.0
+transformers==4.45.2
+datasets==3.0.1
+
+# Metrics
+torchmetrics==1.4.3
+scikit-learn==1.5.2
+seqeval==1.2.2
+
+# Server
+Flask==3.0.3
+Flask-Classful==0.16.0
+
+# Utils
+importlib-metadata==8.5.0
+chrisbase==0.5.6
