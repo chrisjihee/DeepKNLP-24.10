@@ -97,14 +97,24 @@ class NERModel(LightningModule):
 
     def train_dataloader(self):
         self.fabric.print = logger.info if self.fabric.local_rank == 0 else logger.debug
-        # YOUR CODE HERE (1)
+        train_dataset = NERDataset("train", data=self.data, tokenizer=self.lm_tokenizer)
+        train_dataloader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset, replacement=False),
+                                      num_workers=self.args.hardware.cpu_workers,
+                                      batch_size=self.args.hardware.train_batch,
+                                      collate_fn=self.data.encoded_examples_to_batch,
+                                      drop_last=False)
         self.fabric.print(f"Created train_dataset providing {len(train_dataset)} examples")
         self.fabric.print(f"Created train_dataloader providing {len(train_dataloader)} batches")
         return train_dataloader
 
     def val_dataloader(self):
         self.fabric.print = logger.info if self.fabric.local_rank == 0 else logger.debug
-        # YOUR CODE HERE (2)
+        val_dataset = NERDataset("valid", data=self.data, tokenizer=self.lm_tokenizer)
+        val_dataloader = DataLoader(val_dataset, sampler=SequentialSampler(val_dataset),
+                                    num_workers=self.args.hardware.cpu_workers,
+                                    batch_size=self.args.hardware.infer_batch,
+                                    collate_fn=self.data.encoded_examples_to_batch,
+                                    drop_last=False)
         self.fabric.print(f"Created val_dataset providing {len(val_dataset)} examples")
         self.fabric.print(f"Created val_dataloader providing {len(val_dataloader)} batches")
         self._infer_dataset = val_dataset
@@ -112,7 +122,12 @@ class NERModel(LightningModule):
 
     def test_dataloader(self):
         self.fabric.print = logger.info if self.fabric.local_rank == 0 else logger.debug
-        # YOUR CODE HERE (3)
+        test_dataset = NERDataset("test", data=self.data, tokenizer=self.lm_tokenizer)
+        test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset),
+                                     num_workers=self.args.hardware.cpu_workers,
+                                     batch_size=self.args.hardware.infer_batch,
+                                     collate_fn=self.data.encoded_examples_to_batch,
+                                     drop_last=False)
         self.fabric.print(f"Created test_dataset providing {len(test_dataset)} examples")
         self.fabric.print(f"Created test_dataloader providing {len(test_dataloader)} batches")
         self._infer_dataset = test_dataset
@@ -120,7 +135,10 @@ class NERModel(LightningModule):
 
     def training_step(self, inputs, batch_idx):
         inputs.pop("example_ids")
-        # YOUR CODE HERE (4)
+        outputs: TokenClassifierOutput = self.lang_model(**inputs)
+        labels: torch.Tensor = inputs["labels"]
+        preds: torch.Tensor = outputs.logits.argmax(dim=-1)
+        acc: torch.Tensor = accuracy(preds=preds, labels=labels, ignore_index=0)
         return {
             "loss": outputs.loss,
             "acc": acc,
@@ -129,7 +147,8 @@ class NERModel(LightningModule):
     @torch.no_grad()
     def validation_step(self, inputs, batch_idx):
         example_ids: List[int] = inputs.pop("example_ids").tolist()
-        # YOUR CODE HERE (5)
+        outputs: TokenClassifierOutput = self.lang_model(**inputs)
+        preds: torch.Tensor = outputs.logits.argmax(dim=-1)
 
         dict_of_token_pred_ids: Dict[int, List[int]] = {}
         dict_of_char_label_ids: Dict[int, List[int]] = {}
@@ -205,7 +224,20 @@ class NERModel(LightningModule):
             truncation=True,
             return_tensors="pt",
         )
-        # YOUR CODE HERE (6)
+        outputs: TokenClassifierOutput = self.lang_model(**inputs)
+        all_probs: Tensor = outputs.logits[0].softmax(dim=1)
+        top_probs, top_preds = torch.topk(all_probs, dim=1, k=1)
+        tokens = self.lm_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+        top_labels = [self.id_to_label(pred[0].item()) for pred in top_preds]
+        result = []
+        for token, label, top_prob in zip(tokens, top_labels, top_probs):
+            if token in self.lm_tokenizer.all_special_tokens:
+                continue
+            result.append({
+                "token": token,
+                "label": label,
+                "prob": f"{round(top_prob[0].item(), 4):.4f}",
+            })
         return {
             'sentence': text,
             'result': result,
@@ -250,7 +282,10 @@ def train_loop(
             model.train()
             model.args.prog.global_step += 1
             model.args.prog.global_epoch = model.args.prog.global_step / num_batch
-            # YOUR CODE HERE (7)
+            optimizer.zero_grad()
+            outputs = model.training_step(batch, i)
+            fabric.backward(outputs["loss"])
+            optimizer.step()
             progress.update()
             fabric.barrier()
             with torch.no_grad():
