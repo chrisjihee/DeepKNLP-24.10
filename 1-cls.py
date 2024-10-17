@@ -77,27 +77,45 @@ class NSMCModel(LightningModule):
 
     def train_dataloader(self):
         self.fabric.print = logger.info if self.fabric.local_rank == 0 else logger.debug
-        # YOUR CODE HERE (1)
+        train_dataset = ClassificationDataset("train", data=self.data, tokenizer=self.lm_tokenizer)
+        train_dataloader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset, replacement=False),
+                                      num_workers=self.args.hardware.cpu_workers,
+                                      batch_size=self.args.hardware.train_batch,
+                                      collate_fn=data_collator,
+                                      drop_last=False)
         self.fabric.print(f"Created train_dataset providing {len(train_dataset)} examples")
         self.fabric.print(f"Created train_dataloader providing {len(train_dataloader)} batches")
         return train_dataloader
 
     def val_dataloader(self):
         self.fabric.print = logger.info if self.fabric.local_rank == 0 else logger.debug
-        # YOUR CODE HERE (2)
+        val_dataset = ClassificationDataset("valid", data=self.data, tokenizer=self.lm_tokenizer)
+        val_dataloader = DataLoader(val_dataset, sampler=SequentialSampler(val_dataset),
+                                    num_workers=self.args.hardware.cpu_workers,
+                                    batch_size=self.args.hardware.infer_batch,
+                                    collate_fn=data_collator,
+                                    drop_last=False)
         self.fabric.print(f"Created val_dataset providing {len(val_dataset)} examples")
         self.fabric.print(f"Created val_dataloader providing {len(val_dataloader)} batches")
         return val_dataloader
 
     def test_dataloader(self):
         self.fabric.print = logger.info if self.fabric.local_rank == 0 else logger.debug
-        # YOUR CODE HERE (3)
+        test_dataset = ClassificationDataset("test", data=self.data, tokenizer=self.lm_tokenizer)
+        test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset),
+                                     num_workers=self.args.hardware.cpu_workers,
+                                     batch_size=self.args.hardware.infer_batch,
+                                     collate_fn=data_collator,
+                                     drop_last=False)
         self.fabric.print(f"Created test_dataset providing {len(test_dataset)} examples")
         self.fabric.print(f"Created test_dataloader providing {len(test_dataloader)} batches")
         return test_dataloader
 
     def training_step(self, inputs, batch_idx):
-        # YOUR CODE HERE (4)
+        outputs: SequenceClassifierOutput = self.lang_model(**inputs)
+        labels: torch.Tensor = inputs["labels"]
+        preds: torch.Tensor = outputs.logits.argmax(dim=-1)
+        acc: torch.Tensor = accuracy(preds=preds, labels=labels)
         return {
             "loss": outputs.loss,
             "acc": acc,
@@ -105,7 +123,9 @@ class NSMCModel(LightningModule):
 
     @torch.no_grad()
     def validation_step(self, inputs, batch_idx):
-        # YOUR CODE HERE (5)
+        outputs: SequenceClassifierOutput = self.lang_model(**inputs)
+        labels: List[int] = inputs["labels"].tolist()
+        preds: List[int] = outputs.logits.argmax(dim=-1).tolist()
         return {
             "loss": outputs.loss,
             "preds": preds,
@@ -125,7 +145,11 @@ class NSMCModel(LightningModule):
             truncation=True,
             return_tensors="pt",
         )
-        # YOUR CODE HERE (6)
+        outputs: SequenceClassifierOutput = self.lang_model(**inputs)
+        prob = outputs.logits.softmax(dim=1)
+        pred = "긍정 (positive)" if torch.argmax(prob) == 1 else "부정 (negative)"
+        positive_prob = round(prob[0][1].item(), 4)
+        negative_prob = round(prob[0][0].item(), 4)
         return {
             'sentence': text,
             'prediction': pred,
@@ -174,7 +198,10 @@ def train_loop(
             model.train()
             model.args.prog.global_step += 1
             model.args.prog.global_epoch = model.args.prog.global_step / num_batch
-            # YOUR CODE HERE (7)
+            optimizer.zero_grad()
+            outputs = model.training_step(batch, i)
+            fabric.backward(outputs["loss"])
+            optimizer.step()
             progress.update()
             fabric.barrier()
             with torch.no_grad():
